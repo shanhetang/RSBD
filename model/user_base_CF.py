@@ -1,14 +1,15 @@
 """
-基于用户的CF
+基于用户/物品的CF
     1、拆分数据集
         1.1 将id映射到指定范围
         1.2 划分训练集和测试集
     2、根据训练集计算相似度矩阵
         2.1 生成user-item矩阵
         2.2 计算用户相似度
-    3、根据前n个相似度最高的用户进行推荐
-        3.1 获取前n个相似度最高的用户
-        3.2 遍历item，获取top-k最高得分的item
+        2.3 计算物品相似度
+    3、推荐
+        3.1 基于用户的top-k推荐
+        3.2 基于物品的top-k推荐
     4、进行评估
 """
 import json
@@ -17,6 +18,8 @@ import pandas as pd
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity,pairwise_distances
 from collections import defaultdict
+
+from tqdm import tqdm
 
 
 # 1、拆分数据集
@@ -46,9 +49,11 @@ def load_data_and_map_ids(file_path, test_size=0.3):
 
 # 2、根据训练集计算相似度矩阵
 # 2.1 生成user-item矩阵
-def build_user_item_matrix(data):
-    return data.pivot(index='user_id', columns='item_id', values='click').fillna(0)
-
+def build_user_item_matrix(data,user_id_map,item_id_map):
+    user_item_matrix = np.zeros((len(user_id_map),len(item_id_map)))
+    for line in data.itertuples():
+        user_item_matrix[line[1]-1,line[2]-1] = line[3]
+    return pd.DataFrame(user_item_matrix,index=user_id_map.values(),columns=item_id_map.values())
 
 # 2.2 计算用户相似度
 def compute_user_similarity(user_item_matrix,method="cos"):
@@ -58,29 +63,52 @@ def compute_user_similarity(user_item_matrix,method="cos"):
         similarity = 1 - pairwise_distances(user_item_matrix,metric='correlation')
     return pd.DataFrame(similarity,index=user_item_matrix.index,columns=user_item_matrix.index)
 
+# 2.3 计算物品相似度
+def compute_item_similarity(user_item_matrix,method="cos"):
+    if method == 'cos':
+        similarity = cosine_similarity(user_item_matrix.T)
+    else: # method == 'pearson':
+        similarity = 1 - pairwise_distances(user_item_matrix.T,metric='correlation')
+    return pd.DataFrame(similarity,index=user_item_matrix.T.index,columns=user_item_matrix.T.index)
 
-# 3、根据前n个相似度最高的用户进行推荐
-def get_top_n_recommendations(user_item_matrix, user_similarity, n=10, top_k_users=10):
+# 3、推荐
+def get_top_n_recommendations(user_item_matrix, similarity, n=10, top_k=10, method="user"):
     recommendations = defaultdict(list)
-    user_ids = user_item_matrix.index
+    # 3.1 基于用户的top-k推荐
+    if method == "user":
+        user_ids = user_item_matrix.index
+        # 获取前n个相似度最高的用户
+        for user_id in tqdm(user_ids, desc="Processing users"):
+            user_vector = user_item_matrix.iloc[user_id]
+            similar_users = similarity[user_id].argsort()[::-1][1:top_k + 1]  # 取前K个最相似的用户（除了自己）
+            # 遍历item，获取top-k最高得分的item
+            for item_id in user_item_matrix.columns:
+                if user_vector[item_id] == 0:  # 用户未交互过的物品
+                    similar_users_ratings = user_item_matrix.iloc[similar_users, item_id]
+                    similar_users_similarities = similarity.iloc[user_id, similar_users]
+                    # 加权平均得分
+                    score = np.sum(similar_users_ratings * similar_users_similarities) / np.sum(
+                        similar_users_similarities)
+                    if score > 0:
+                        recommendations[user_id].append((item_id, score))
+            recommendations[user_id] = sorted(recommendations[user_id], key=lambda x: x[1], reverse=True)[:n]
+    # 3.2 基于物品的top-k推荐
+    elif method == "item":
+        user_ids = user_item_matrix.index
+        for user_id in tqdm(user_ids, desc="Processing users"):
+            # 获取交互过的物品和候选物品
+            user_vector = user_item_matrix.iloc[user_id]
+            interacted_items = user_vector[user_vector > 0].index
+            candidate_items = user_item_matrix.columns[~user_item_matrix.columns.isin(interacted_items)]
 
-    # 3.1 获取前n个相似度最高的用户
-    for i, user_id in enumerate(user_ids):
-        user_vector = user_item_matrix.iloc[i]
-        similar_users = user_similarity[i].argsort()[::-1][1:top_k_users + 1]  # 取前K个最相似的用户（除了自己）
-        # 3.2 遍历item，获取top-k最高得分的item
-        for item_id in user_item_matrix.columns:
-            if user_vector[item_id] == 0:  # 用户未交互过的物品
-                similar_users_ratings = user_item_matrix.iloc[similar_users, item_id]
-                similar_users_similarities = user_similarity[i, similar_users]
-                # 加权平均得分
-                score = np.sum(similar_users_ratings * similar_users_similarities) / np.sum(similar_users_similarities)
+            # 计算得分
+            item_scores = defaultdict(float)
+            for item in candidate_items:
+                for interacted_item in interacted_items:
+                    item_scores[item] += similarity.iloc[item, interacted_item] * user_vector[interacted_item]
 
-                if score > 0:
-                    recommendations[user_id].append((item_id, score))
-
-        recommendations[user_id] = sorted(recommendations[user_id], key=lambda x: x[1], reverse=True)[:n]
-
+            top_items = sorted(item_scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+            recommendations[user_id] = top_items
     return recommendations
 
 
