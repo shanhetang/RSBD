@@ -23,7 +23,7 @@ from tqdm import tqdm
 
 
 # 1、拆分数据集
-def load_data_and_map_ids(file_path, test_size=0.3):
+def load_data_and_map_ids(file_path, test_size=0.2):
     # 读取数据
     data = pd.read_csv(file_path, sep=' ', header=None, names=['user_id', 'item_id', 'click'])
 
